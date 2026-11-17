@@ -312,6 +312,20 @@ func (tb *Torbox) getTorboxStatus(status string, finished bool) types.TorrentSta
 	}
 }
 
+// torrentStatus is the torrent status for a TorBox torrent. TorBox reports an
+// uncached torrent "uploading" or "completed" while it is still moving the
+// files into its own storage, before download_finished is set - and files
+// only get a link once it is. It stays downloading until download_finished is
+// set and the torrent has files, so completion never runs against an empty
+// file list ("Downloading 0 files..." / "no valid download links available").
+func (tb *Torbox) torrentStatus(data *torboxInfo) types.TorrentStatus {
+	status := tb.getTorboxStatus(data.DownloadState, data.DownloadFinished)
+	if status == types.TorrentStatusDownloaded && (!data.DownloadFinished || len(data.Files) == 0) {
+		return types.TorrentStatusDownloading
+	}
+	return status
+}
+
 func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 	if strings.HasPrefix(torrentId, queuedPrefix) {
 		t := &types.Torrent{Id: torrentId, Debrid: tb.config.Name, Files: make(map[string]types.File)}
@@ -337,7 +351,7 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 		Name:             data.Name,
 		Bytes:            data.Size,
 		Progress:         data.Progress * 100,
-		Status:           tb.getTorboxStatus(data.DownloadState, data.DownloadFinished),
+		Status:           tb.torrentStatus(data),
 		Speed:            data.DownloadSpeed,
 		Seeders:          data.Seeds,
 		Filename:         data.Name,
@@ -436,7 +450,7 @@ func (tb *Torbox) updateTorrentWithClient(client *request.Client, t *types.Torre
 	t.Name = name
 	t.Bytes = data.Size
 	t.Progress = data.Progress * 100
-	t.Status = tb.getTorboxStatus(data.DownloadState, data.DownloadFinished)
+	t.Status = tb.torrentStatus(data)
 	t.Speed = data.DownloadSpeed
 	t.Seeders = data.Seeds
 	t.Filename = name
@@ -497,6 +511,11 @@ func (tb *Torbox) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
 			tb.logger.Info().Msgf("Torrent: %s downloaded", torrent.Name)
 			return torrent, nil
 		case types.TorrentStatusDownloading:
+			// Fetched in full but not linkable yet (still uploading to
+			// TorBox storage): still processing, not a cache miss.
+			if torrent.Progress >= 100 {
+				return torrent, nil
+			}
 			if !torrent.DownloadUncached {
 				return torrent, fmt.Errorf("torrent %s: %w", torrent.Name, customerror.TorrentNotCachedError)
 			}
@@ -712,7 +731,7 @@ func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
 			Name:             data.Name,
 			Bytes:            data.Size,
 			Progress:         data.Progress * 100,
-			Status:           tb.getTorboxStatus(data.DownloadState, data.DownloadFinished),
+			Status:           tb.torrentStatus(&data),
 			Speed:            data.DownloadSpeed,
 			Seeders:          data.Seeds,
 			Filename:         data.Name,
