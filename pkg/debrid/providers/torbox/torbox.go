@@ -290,7 +290,10 @@ func (tb *Torbox) getTorboxStatus(status string, finished bool) types.TorrentSta
 	status = regexp.MustCompile(`\s*\(.*?\)\s*`).ReplaceAllString(status, "")
 
 	switch status {
-	case "paused", "downloading", "checkingResumeData", "metaDL", "pausedUP",
+	// TorBox reports an uncached add as "checking" for its first seconds and
+	// "processing" between download and "completed". Both are healthy; left
+	// out, they fail a working download a few seconds after it is added.
+	case "paused", "downloading", "checking", "processing", "checkingResumeData", "metaDL", "pausedUP",
 		"queuedUP", "checkingUP", "forcedUP", "allocating", "pausedDL",
 		"queuedDL", "checkingDL", "forcedDL", "moving", "incomplete", "queued":
 		return types.TorrentStatusDownloading

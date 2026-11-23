@@ -295,3 +295,20 @@ func TestFetchDownloadLinkFallsBackToRedirectURL(t *testing.T) {
 		t.Fatalf("DownloadLink = %q, want the redirect URL", dl.DownloadLink)
 	}
 }
+
+func TestGetTorboxStatusTreatsTransitionalStatesAsDownloading(t *testing.T) {
+	tb := &Torbox{}
+	for _, state := range []string{"checking", "processing", "downloading", "metaDL", "stalled (no seeds)"} {
+		got := tb.getTorboxStatus(state, false)
+		want := types.TorrentStatusDownloading
+		if state == "stalled (no seeds)" {
+			want = types.TorrentStatusError
+		}
+		if got != want {
+			t.Errorf("getTorboxStatus(%q) = %q, want %q", state, got, want)
+		}
+	}
+	if got := tb.getTorboxStatus("checking", true); got != types.TorrentStatusDownloaded {
+		t.Errorf("finished torrent = %q, want downloaded", got)
+	}
+}
