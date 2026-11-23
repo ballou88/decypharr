@@ -337,6 +337,15 @@ func (s *Service) getPlacementFile(entry *storage.Entry, filename string) (*stor
 				"refresh_failed",
 			)
 		}
+		// The refresher returns (nil, nil) when the entry is not in storage yet,
+		// e.g. an uncached torrent that has just finished on the provider.
+		// Retry instead of dereferencing nil, which crashed the whole process.
+		if refreshed == nil {
+			return nil, NewRefetchableError(
+				fmt.Errorf("entry %s not found on refresh", entry.InfoHash),
+				"refresh_empty",
+			)
+		}
 
 		file := refreshed.Files[filename]
 		if file == nil {
