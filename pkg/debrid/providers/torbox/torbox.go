@@ -320,6 +320,12 @@ func (tb *Torbox) getTorboxStatus(status string, finished bool) types.TorrentSta
 // file list ("Downloading 0 files..." / "no valid download links available").
 func (tb *Torbox) torrentStatus(data *torboxInfo) types.TorrentStatus {
 	status := tb.getTorboxStatus(data.DownloadState, data.DownloadFinished)
+	if status == types.TorrentStatusError {
+		// Name the raw TorBox state: the caller's "has error" alone does not say
+		// which state was unmapped.
+		tb.logger.Warn().Str("download_state", data.DownloadState).Int("id", data.Id).
+			Str("name", data.Name).Msg("TorBox state mapped to error")
+	}
 	if status == types.TorrentStatusDownloaded && (!data.DownloadFinished || len(data.Files) == 0) {
 		return types.TorrentStatusDownloading
 	}
