@@ -553,12 +553,15 @@ func (tb *Torbox) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
 var errNotVisibleYet = errors.New("torbox: torrent not visible yet")
 
 // visibilityGrace is how long after an add a not-found answer means "not
-// listed yet" rather than "gone". TorBox settles in about 15 s.
-const visibilityGrace = 45 * time.Second
+// listed yet" rather than "gone". The bypass_cache per-id lookup settled about
+// 3 s after the add; the list took up to 15 s. Keep it short: the qBittorrent
+// add request waits on CheckStatus, and clients give up on it (BookOrbit
+// after 20 s).
+const visibilityGrace = 12 * time.Second
 
 // visibilityPoll is the wait between lookups inside that window. A var so
 // tests can shorten it.
-var visibilityPoll = 3 * time.Second
+var visibilityPoll = 2 * time.Second
 
 // queuedPrefix marks a Torrent.Id that is a TorBox queued id, not a torrent id.
 const queuedPrefix = "queued:"
