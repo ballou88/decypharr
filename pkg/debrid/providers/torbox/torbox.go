@@ -1,6 +1,7 @@
 package torbox
 
 import (
+	"errors"
 	"bytes"
 	"cmp"
 	"context"
@@ -441,7 +442,16 @@ func (tb *Torbox) updateTorrentWithClient(client *request.Client, t *types.Torre
 		return err
 	}
 
-	if resp.StatusCode == http.StatusNotFound && t.InfoHash != "" {
+	// TorBox answers ITEM_NOT_FOUND as a 404, sometimes with an empty data object.
+	notFound := resp.StatusCode == http.StatusNotFound ||
+		(resp.StatusCode >= 200 && resp.StatusCode < 300 && (res.Data == nil || res.Data.Id == 0))
+	if notFound && !t.Added.IsZero() && time.Since(t.Added) < visibilityGrace {
+		// For the first seconds after createtorrent returns an id, TorBox's
+		// per-id lookup and its list both flap between found and not found.
+		// Ask again by id rather than scanning the whole account.
+		return errNotVisibleYet
+	}
+	if notFound && t.InfoHash != "" {
 		// TorBox can move a just-created torrent into its queue (active download
 		// limit), so its id stops resolving. Find it again by hash before calling
 		// it failed.
@@ -449,6 +459,9 @@ func (tb *Torbox) updateTorrentWithClient(client *request.Client, t *types.Torre
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("torbox API error: Status: %d", resp.StatusCode)
+	}
+	if notFound {
+		return fmt.Errorf("torbox: torrent %s not found", t.Id)
 	}
 	data := res.Data
 	name := data.Name
@@ -507,6 +520,10 @@ func (tb *Torbox) updateTorrentWithClient(client *request.Client, t *types.Torre
 func (tb *Torbox) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
 	for {
 		err := tb.updateTorrentWithClient(tb.submissionClient(), torrent)
+		if errors.Is(err, errNotVisibleYet) {
+			time.Sleep(visibilityPoll)
+			continue
+		}
 
 		if err != nil || torrent == nil {
 			return torrent, err
@@ -531,6 +548,17 @@ func (tb *Torbox) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
 		}
 	}
 }
+
+// errNotVisibleYet: a torrent added moments ago that TorBox cannot find yet.
+var errNotVisibleYet = errors.New("torbox: torrent not visible yet")
+
+// visibilityGrace is how long after an add a not-found answer means "not
+// listed yet" rather than "gone". TorBox settles in about 15 s.
+const visibilityGrace = 45 * time.Second
+
+// visibilityPoll is the wait between lookups inside that window. A var so
+// tests can shorten it.
+var visibilityPoll = 3 * time.Second
 
 // queuedPrefix marks a Torrent.Id that is a TorBox queued id, not a torrent id.
 const queuedPrefix = "queued:"
@@ -586,7 +614,19 @@ func (tb *Torbox) updateQueued(client *request.Client, t *types.Torrent) error {
 		for _, active := range torrents {
 			if strings.EqualFold(active.InfoHash, t.InfoHash) && active.Id != "" {
 				if active.Id == t.Id {
-					return fmt.Errorf("torbox: torrent %s is listed but its id does not resolve", t.Id)
+					// The list has it but the per-id lookup still 404s (seen for
+					// minutes). Take the state from the list entry.
+					t.Name = cmp.Or(active.Name, t.Name)
+					t.Bytes = active.Bytes
+					t.Progress = active.Progress
+					t.Status = active.Status
+					t.Speed = active.Speed
+					t.Seeders = active.Seeders
+					t.Filename = cmp.Or(active.Filename, t.Filename)
+					t.OriginalFilename = cmp.Or(active.OriginalFilename, t.OriginalFilename)
+					t.Files = active.Files
+					t.Debrid = tb.config.Name
+					return nil
 				}
 				t.Id = active.Id
 				return tb.updateTorrentWithClient(client, t)

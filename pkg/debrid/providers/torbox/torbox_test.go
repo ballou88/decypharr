@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
@@ -486,5 +487,101 @@ func TestCheckStatusKeepsUploadingTorrentPending(t *testing.T) {
 		if f.Link != "" {
 			t.Fatalf("file %s has link %q before download_finished", f.Name, f.Link)
 		}
+	}
+}
+
+// Right after createtorrent, TorBox's per-id lookup 404s for a few seconds.
+// A torrent added moments ago must be asked about again, not failed.
+func TestJustAddedTorrentIsPolledUntilVisible(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+	old := visibilityPoll
+	visibilityPoll = time.Millisecond
+	t.Cleanup(func() { visibilityPoll = old })
+	lookups := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/torrents/mylist" && r.URL.Query().Get("id") == "42":
+			lookups++
+			if lookups < 3 {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = fmt.Fprint(w, `{"success":true,"error":"ITEM_NOT_FOUND","detail":"No torrents found for this user.","data":{}}`)
+				return
+			}
+			_, _ = fmt.Fprint(w, `{"success":true,"data":{"id":42,"hash":"abc","name":"Show","download_state":"cached","download_finished":true,"progress":1,"files":[{"id":0,"name":"Show/episode.mkv","absolute_path":"Show/episode.mkv","size":0}]}}`)
+		default:
+			t.Errorf("unexpected request %s", r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	tb := testTorbox(server.URL)
+
+	torrent := &types.Torrent{Id: "42", InfoHash: "abc", Added: time.Now(), Files: map[string]types.File{}}
+	got, err := tb.CheckStatus(torrent)
+	if err != nil {
+		t.Fatalf("CheckStatus() error = %v", err)
+	}
+	if got.Status != types.TorrentStatusDownloaded || lookups != 3 {
+		t.Fatalf("Status=%v after %d lookups, want downloaded after 3", got.Status, lookups)
+	}
+}
+
+// The account list has the torrent but its per-id lookup keeps 404ing.
+// Take the state from the list entry instead of failing.
+func TestListedTorrentWithUnresolvableIdUsesListEntry(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/torrents/mylist" && r.URL.Query().Get("id") == "42":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprint(w, `{"success":true,"error":"ITEM_NOT_FOUND","data":{}}`)
+		case r.URL.Path == "/api/queued/getqueued":
+			_, _ = fmt.Fprint(w, `{"success":true,"data":[]}`)
+		case r.URL.Path == "/api/torrents/mylist":
+			if r.URL.Query().Get("offset") != "0" {
+				_, _ = fmt.Fprint(w, `{"success":true,"data":[]}`)
+				return
+			}
+			_, _ = fmt.Fprint(w, `{"success":true,"data":[{"id":42,"hash":"ABC","name":"Show","download_state":"cached","download_finished":true,"progress":1,"files":[{"id":0,"name":"Show/episode.mkv","absolute_path":"Show/episode.mkv","size":0}]}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	tb := testTorbox(server.URL)
+
+	torrent := &types.Torrent{Id: "42", InfoHash: "abc", Added: time.Now().Add(-10 * time.Minute)}
+	got, err := tb.CheckStatus(torrent)
+	if err != nil {
+		t.Fatalf("CheckStatus() error = %v", err)
+	}
+	if got.Status != types.TorrentStatusDownloaded || len(got.Files) != 1 {
+		t.Fatalf("Status=%v files=%d, want downloaded with 1 file", got.Status, len(got.Files))
+	}
+}
+
+// Past the grace window, a torrent that is nowhere is still an error.
+func TestOldTorrentMissingEverywhereStillFails(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/torrents/mylist" && r.URL.Query().Get("id") != "":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprint(w, `{"success":true,"error":"ITEM_NOT_FOUND","data":{}}`)
+		case r.URL.Path == "/api/queued/getqueued", r.URL.Path == "/api/torrents/mylist":
+			_, _ = fmt.Fprint(w, `{"success":true,"data":[]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	tb := testTorbox(server.URL)
+
+	torrent := &types.Torrent{Id: "42", InfoHash: "abc", Added: time.Now().Add(-10 * time.Minute)}
+	if _, err := tb.CheckStatus(torrent); err == nil {
+		t.Fatal("CheckStatus() error = nil, want an error for a torrent that is gone")
 	}
 }
